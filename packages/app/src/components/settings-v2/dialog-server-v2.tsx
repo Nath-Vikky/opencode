@@ -1,67 +1,139 @@
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from "@opencode-ai/ui/v2/dialog-v2"
 import { DividerV2 } from "@opencode-ai/ui/v2/divider-v2"
+import { SelectV2 } from "@opencode-ai/ui/v2/select-v2"
 import { TextInputV2 } from "@opencode-ai/ui/v2/text-input-v2"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
-import { useMutation } from "@tanstack/solid-query"
 import { type Component, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
-import { createStore } from "solid-js/store"
-import {
-  createServerHealthPreview,
-  replaceServerConnection,
-  type ServerFormValues,
-} from "@/components/server/server-management"
-import { useGlobal } from "@/context/global"
 import { useLanguage } from "@/context/language"
-import { normalizeServerUrl, ServerConnection, useServer } from "@/context/server"
-import { useTabs } from "@/context/tabs"
-import { useCheckServerHealth } from "@/utils/server-health"
+import { normalizeServerUrl, type ServerConnection, serverName } from "@/context/server"
+import { SettingsServerDataScope } from "../settings-server-picker"
+import { useServerManagementController } from "../dialog-select-server"
+import { createShellOptions, createShellSettingsController } from "./general-controllers"
 import "./settings-v2.css"
 
-const DEFAULT_USERNAME = "opencode"
+const ServerShellField: Component = () => {
+  const language = useLanguage()
+  const controller = createShellSettingsController()
+  const options = createMemo(() =>
+    createShellOptions({
+      shells: controller.shells(),
+      current: controller.current(),
+    }),
+  )
 
-type FormMode = "list" | "add" | "edit"
+  return (
+    <div class="flex w-full min-w-0 flex-col gap-2">
+      <label class="settings-v2-server-dialog-label">{language.t("settings.general.row.shell.title")}</label>
+      <SelectV2
+        appearance="large"
+        class="!w-full self-stretch"
+        data-action="settings-shell"
+        options={options()}
+        current={options().find((option) => option.value === controller.current()) ?? options()[0]}
+        placement="bottom-end"
+        gutter={6}
+        value={(option) => option.id}
+        label={(option) => {
+          if (option.id === "auto") return language.t("settings.general.row.shell.autoDefault")
+          if (!option.terminalOnly) return option.name
+          return `${option.name} (${language.t("settings.general.row.shell.terminalOnly")})`
+        }}
+        onSelect={(option) => option && controller.select(option.value)}
+      />
+      <span class="text-11-regular text-v2-text-text-muted">
+        {language.t("settings.general.row.shell.description")}
+      </span>
+    </div>
+  )
+}
+
+const ScopedServerShellField: Component<{ server: ServerConnection.Any }> = (props) => (
+  <SettingsServerDataScope server={props.server}>
+    <ServerShellField />
+  </SettingsServerDataScope>
+)
 
 export const DialogServerV2: Component<{
   mode: "add" | "edit"
-  server?: ServerConnection.Http
+  server?: ServerConnection.Any
 }> = (props) => {
   const dialog = useDialog()
   const language = useLanguage()
-  const form = createFormController({
+  const controller = useServerManagementController({
     onSelect: () => dialog.close(),
   })
   const [opened, setOpened] = createSignal(false)
+  const [step, setStep] = createSignal<"address" | "authenticate">("address")
+  const managed = () => props.mode === "edit" && props.server?.type !== "http"
 
   onMount(() => {
-    if (props.mode === "add") form.start.add()
-    if (props.mode === "edit" && props.server) form.start.edit(props.server)
+    if (props.mode === "add") controller.startAdd()
+    if (props.mode === "edit" && props.server?.type === "http") controller.startEdit(props.server)
     setOpened(true)
   })
 
   onCleanup(() => {
-    form.reset()
+    controller.resetForm()
   })
 
   createEffect(() => {
-    if (!opened()) return
-    if (form.state.open()) return
+    if (!opened() || managed()) return
+    if (controller.isFormMode()) return
     dialog.close()
   })
+
+  const authenticate = () => {
+    if (!normalizeServerUrl(controller.formValue())) return
+    if (!controller.formName()) controller.handleFormNameChange()(controller.formValue())
+    setStep("authenticate")
+  }
+
+  const submit = () => {
+    if (managed()) {
+      dialog.close()
+      return
+    }
+    if (props.mode === "add" && step() === "address") {
+      authenticate()
+      return
+    }
+    controller.submitForm()
+  }
 
   const keyDown = (event: KeyboardEvent) => {
     if (event.key !== "Enter" || event.isComposing) return
     event.preventDefault()
-    form.submit()
+    submit()
   }
 
-  const title = () =>
-    props.mode === "add" ? language.t("dialog.server.add.title") : language.t("dialog.server.edit.title")
+  const showConnectionFields = () => !managed() && (props.mode === "edit" || step() === "authenticate")
+  const shellServer = createMemo<ServerConnection.Any | undefined>(() => {
+    if (managed()) return props.server
+    if (props.mode === "add") return
+    if (!showConnectionFields()) return
+    const url = normalizeServerUrl(controller.formValue())
+    if (!url) return
+    const http: ServerConnection.HttpBase = { url }
+    if (controller.formPassword()) http.password = controller.formPassword()
+    if (controller.formPassword() && controller.formUsername()) http.username = controller.formUsername()
+    return {
+      type: "http",
+      displayName: controller.formName() || undefined,
+      http,
+    }
+  })
 
-  const submitLabel = () => {
-    if (form.state.busy()) return language.t("dialog.server.add.checking")
-    if (props.mode === "add") return language.t("dialog.server.add.button")
-    return language.t("common.save")
+  const title = () => {
+    if (props.mode === "edit") return language.t("dialog.server.edit.title")
+    if (step() === "address") return language.t("dialog.server.add.title")
+    return (
+      <span class="flex items-center gap-2">
+        <span class="text-v2-text-text-muted">{language.t("dialog.server.add.title")}</span>
+        <span aria-hidden="true">›</span>
+        <span>{language.t("dialog.server.authenticate.title")}</span>
+      </span>
+    )
   }
 
   return (
@@ -72,233 +144,124 @@ export const DialogServerV2: Component<{
       <DividerV2 />
       <DialogBody class="flex w-full min-w-0 flex-1 flex-col px-4 pt-4 pb-2">
         <div class="flex w-full min-w-0 flex-col gap-6">
-          <div class="flex w-full min-w-0 flex-col gap-2">
-            <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.url")}</label>
-            <TextInputV2
-              type="text"
-              appearance="large"
-              class="!w-full self-stretch"
-              value={form.state.value()}
-              placeholder={language.t("dialog.server.add.placeholder")}
-              invalid={!!form.state.error()}
-              disabled={form.state.busy()}
-              autofocus
-              onInput={(event) => form.change.value(event.currentTarget.value)}
-              onKeyDown={keyDown}
-            />
-            <Show when={form.state.error()}>
-              <span class="settings-v2-server-dialog-error">{form.state.error()}</span>
-            </Show>
-          </div>
-          <div class="flex w-full min-w-0 flex-col gap-2">
-            <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.name")}</label>
-            <TextInputV2
-              type="text"
-              appearance="large"
-              class="!w-full self-stretch"
-              value={form.state.name()}
-              placeholder={language.t("dialog.server.add.namePlaceholder")}
-              disabled={form.state.busy()}
-              onInput={(event) => form.change.name(event.currentTarget.value)}
-              onKeyDown={keyDown}
-            />
-          </div>
-          <div class="grid w-full min-w-0 grid-cols-2 gap-4">
-            <div class="flex min-w-0 flex-col gap-2">
-              <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.username")}</label>
+          <Show
+            when={props.mode === "add" && step() === "address"}
+            fallback={
+              <>
+                <Show
+                  when={!managed()}
+                  fallback={
+                    <Show when={props.server?.type === "sidecar" && props.server.variant === "wsl"}>
+                      <div class="flex w-full min-w-0 flex-col gap-2">
+                        <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.name")}</label>
+                        <TextInputV2
+                          type="text"
+                          appearance="large"
+                          class="!w-full self-stretch"
+                          value={serverName(props.server)}
+                          disabled
+                        />
+                      </div>
+                    </Show>
+                  }
+                >
+                  <div class="flex w-full min-w-0 flex-col gap-2">
+                    <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.url")}</label>
+                    <TextInputV2
+                      type="text"
+                      appearance="large"
+                      class="!w-full self-stretch"
+                      value={controller.formValue()}
+                      placeholder={language.t("dialog.server.add.placeholder")}
+                      invalid={!!controller.formError()}
+                      disabled={controller.formBusy()}
+                      onInput={(event) => controller.handleFormChange()(event.currentTarget.value)}
+                      onKeyDown={keyDown}
+                    />
+                    <Show when={controller.formError()}>
+                      <span class="settings-v2-server-dialog-error">{controller.formError()}</span>
+                    </Show>
+                  </div>
+                  <div class="flex w-full min-w-0 flex-col gap-2">
+                    <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.name")}</label>
+                    <TextInputV2
+                      type="text"
+                      appearance="large"
+                      class="!w-full self-stretch"
+                      value={controller.formName()}
+                      placeholder={language.t("dialog.server.add.namePlaceholder")}
+                      disabled={controller.formBusy()}
+                      onInput={(event) => controller.handleFormNameChange()(event.currentTarget.value)}
+                      onKeyDown={keyDown}
+                    />
+                  </div>
+                  <div class="flex w-full min-w-0 flex-col gap-2">
+                    <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.username")}</label>
+                    <TextInputV2
+                      type="text"
+                      appearance="large"
+                      class="!w-full self-stretch"
+                      value={controller.formUsername()}
+                      placeholder={language.t("dialog.server.add.usernamePlaceholder")}
+                      disabled={controller.formBusy()}
+                      onInput={(event) => controller.handleFormUsernameChange()(event.currentTarget.value)}
+                      onKeyDown={keyDown}
+                    />
+                  </div>
+                  <div class="flex w-full min-w-0 flex-col gap-2">
+                    <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.password")}</label>
+                    <TextInputV2
+                      type="password"
+                      appearance="large"
+                      class="!w-full self-stretch"
+                      value={controller.formPassword()}
+                      placeholder={language.t("dialog.server.add.passwordPlaceholder")}
+                      disabled={controller.formBusy()}
+                      onInput={(event) => controller.handleFormPasswordChange()(event.currentTarget.value)}
+                      onKeyDown={keyDown}
+                    />
+                  </div>
+                </Show>
+                <Show when={shellServer()} keyed>
+                  {(server) => <ScopedServerShellField server={server} />}
+                </Show>
+              </>
+            }
+          >
+            <div class="flex w-full min-w-0 flex-col gap-2">
+              <label class="settings-v2-server-dialog-label">
+                {language.t("dialog.server.add.url")}
+                <span class="text-v2-text-text-danger">*</span>
+              </label>
               <TextInputV2
                 type="text"
                 appearance="large"
                 class="!w-full self-stretch"
-                value={form.state.username()}
-                placeholder={language.t("dialog.server.add.usernamePlaceholder")}
-                disabled={form.state.busy()}
-                onInput={(event) => form.change.username(event.currentTarget.value)}
+                value={controller.formValue()}
+                placeholder={language.t("dialog.server.add.placeholder")}
+                disabled={controller.formBusy()}
+                autofocus
+                onInput={(event) => controller.handleFormChange()(event.currentTarget.value)}
                 onKeyDown={keyDown}
               />
             </div>
-            <div class="flex min-w-0 flex-col gap-2">
-              <label class="settings-v2-server-dialog-label">{language.t("dialog.server.add.password")}</label>
-              <TextInputV2
-                type="password"
-                appearance="large"
-                class="!w-full self-stretch"
-                value={form.state.password()}
-                placeholder={language.t("dialog.server.add.passwordPlaceholder")}
-                disabled={form.state.busy()}
-                onInput={(event) => form.change.password(event.currentTarget.value)}
-                onKeyDown={keyDown}
-              />
-            </div>
-          </div>
+          </Show>
         </div>
       </DialogBody>
       <DialogFooter>
-        <ButtonV2 variant="neutral" disabled={form.state.busy()} onClick={() => dialog.close()}>
+        <ButtonV2 variant="neutral" disabled={controller.formBusy()} onClick={() => dialog.close()}>
           {language.t("common.cancel")}
         </ButtonV2>
-        <ButtonV2 variant="contrast" disabled={form.state.busy()} onClick={form.submit}>
-          {submitLabel()}
+        <ButtonV2
+          variant="contrast"
+          disabled={controller.formBusy() || (props.mode === "add" && step() === "address" && !controller.formValue())}
+          onClick={submit}
+        >
+          {controller.formBusy() ? language.t("dialog.server.add.checking") : language.t("dialog.server.add.button")}
         </ButtonV2>
       </DialogFooter>
     </Dialog>
   )
 }
 
-function createFormController(options: { onSelect?: () => void } = {}) {
-  const server = useServer()
-  const tabs = useTabs()
-  const global = useGlobal()
-  const language = useLanguage()
-  const checkServerHealth = useCheckServerHealth()
-  const healthPreview = createServerHealthPreview(checkServerHealth)
-  const [store, setStore] = createStore({
-    mode: "list" as FormMode,
-    originalUrl: undefined as string | undefined,
-    values: { url: "", name: "", username: DEFAULT_USERNAME, password: "" },
-    error: "",
-    status: undefined as boolean | undefined,
-  })
-
-  onCleanup(healthPreview.cancel)
-
-  const reset = () => {
-    healthPreview.cancel()
-    setStore({
-      mode: "list",
-      originalUrl: undefined,
-      values: { url: "", name: "", username: DEFAULT_USERNAME, password: "" },
-      error: "",
-      status: undefined,
-    })
-  }
-  const allServers = () => {
-    if (!server.current || server.list.includes(server.current)) return server.list
-    return [server.current, ...server.list]
-  }
-  const editing = createMemo(() =>
-    allServers().find((item) => item.type === "http" && item.http.url === store.originalUrl),
-  )
-  const add = (connection: ServerConnection.Http) => server.add(connection)
-  const replace = (originalKey: ServerConnection.Key, next: ServerConnection.Http) =>
-    replaceServerConnection(originalKey, next, {
-      active: () => server.key,
-      removeTabs: (key) => tabs.removeServer(key),
-      add,
-      setActive: (key) => server.setActive(key),
-      remove: (key) => server.remove(key),
-    })
-
-  const request = useMutation(() => ({
-    mutationFn: async () => {
-      const normalized = normalizeServerUrl(store.values.url)
-      if (!normalized) {
-        reset()
-        return
-      }
-
-      const original = store.mode === "edit" ? editing() : undefined
-      if (store.mode === "edit" && !original) return
-      const name = store.values.name.trim() || undefined
-      const username = store.values.username || undefined
-      const password = store.values.password || undefined
-      if (
-        original?.type === "http" &&
-        normalized === original.http.url &&
-        name === original.displayName &&
-        username === original.http.username &&
-        password === original.http.password
-      ) {
-        reset()
-        return
-      }
-
-      const connection: ServerConnection.Http = {
-        type: "http",
-        displayName: name,
-        http: {
-          url: normalized,
-          username: store.mode === "add" && !password ? undefined : username,
-          password,
-        },
-      }
-      const result = await checkServerHealth(connection.http)
-      if (!result.healthy) {
-        setStore("error", language.t("dialog.server.add.error"))
-        return
-      }
-      if (original?.type === "http") {
-        if (normalized === original.http.url) add(connection)
-        if (normalized !== original.http.url) replace(ServerConnection.key(original), connection)
-        reset()
-        return
-      }
-
-      reset()
-      add(connection)
-      options.onSelect?.()
-    },
-  }))
-
-  const preview = () => void healthPreview.preview(store.values, (status) => setStore("status", status))
-  const change = (field: keyof ServerFormValues, value: string) => {
-    if (request.isPending) return
-    setStore("values", field, value)
-    setStore("error", "")
-    if (field !== "name") preview()
-  }
-  const startAdd = () => {
-    reset()
-    setStore("mode", "add")
-  }
-  const startEdit = (connection: ServerConnection.Http) => {
-    reset()
-    setStore({
-      mode: "edit",
-      originalUrl: connection.http.url,
-      values: {
-        url: connection.http.url,
-        name: connection.displayName ?? "",
-        username: connection.http.username ?? "",
-        password: connection.http.password ?? "",
-      },
-      error: "",
-      status: global.servers.health[ServerConnection.key(connection)]?.healthy,
-    })
-  }
-  const submit = () => {
-    if (store.mode === "list" || request.isPending) return
-    setStore("error", "")
-    request.mutate()
-  }
-
-  createEffect(() => {
-    if (store.mode !== "edit") return
-    if (editing()) return
-    reset()
-  })
-
-  return {
-    state: {
-      mode: () => store.mode,
-      open: () => store.mode !== "list",
-      adding: () => store.mode === "add",
-      busy: () => request.isPending,
-      value: () => store.values.url,
-      name: () => store.values.name,
-      username: () => store.values.username,
-      password: () => store.values.password,
-      error: () => store.error,
-      status: () => store.status,
-    },
-    change: {
-      value: (value: string) => change("url", value),
-      name: (value: string) => change("name", value),
-      username: (value: string) => change("username", value),
-      password: (value: string) => change("password", value),
-    },
-    start: { add: startAdd, edit: startEdit },
-    reset,
-    submit,
-  }
-}
+  

@@ -12,7 +12,7 @@ import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { DialogBody, DialogHeader, DialogTitle, DialogV2 } from "@opencode-ai/ui/v2/dialog-v2"
 import { TextInputV2 } from "@opencode-ai/ui/v2/text-input-v2"
 import { showToast } from "@/utils/toast"
-import { type Accessor, type Component, createMemo, createUniqueId, For, Match, onMount, Show, Switch } from "solid-js"
+import { type Accessor, type Component, createMemo, createUniqueId, For, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useParams } from "@solidjs/router"
 import { ExternalLink } from "@/components/external-link"
@@ -375,7 +375,21 @@ function ProviderConnection(props: {
   const settings = useSettings()
   const newLayout = settings.general.newLayoutDesigns
   const providers = useProviders(() => props.directory?.())
-  const directory = () => props.directory?.() ?? decode64(params.dir)
+  const directory = () => (props.directory ? props.directory() : decode64(params.dir))
+  const location = () => {
+    const value = directory()
+    return value ? { directory: value } : undefined
+  }
+
+  const alive = { value: true }
+  const timer = { current: undefined as ReturnType<typeof setTimeout> | undefined }
+
+  onCleanup(() => {
+    alive.value = false
+    if (timer.current === undefined) return
+    clearTimeout(timer.current)
+    timer.current = undefined
+  })
 
   const provider = createMemo(
     () => providers.all().get(props.provider) ?? serverSync().data.provider.all.get(props.provider)!,

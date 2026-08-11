@@ -1,4 +1,4 @@
-import { createMemo, createResource, onMount, type Accessor } from "solid-js"
+import { createMemo, createResource, onCleanup, onMount, type Accessor } from "solid-js"
 import type { ColorScheme } from "@opencode-ai/ui/theme/context"
 import { useTheme } from "@opencode-ai/ui/theme/context"
 import { usePermission } from "@/context/permission"
@@ -50,23 +50,14 @@ export function createPermissionScopeController(sessionID: Accessor<string | und
 
 export function createShellSettingsController() {
   const serverSync = useServerSync()
-  const [shells] = createResource(
-    async () => {
-      // TODO: Dax is considering the V2 shell discovery and config update APIs.
-      // return (await sdk.api.pty.shells()).data
-      return [] as ShellOption[]
-    },
-    { initialValue: [] as ShellOption[] },
-  )
+  const [shells] = createResource(async () => [] as ShellOption[], { initialValue: [] as ShellOption[] })
   const current = createMemo(() => serverSync().data.config.shell ?? "")
-
   return {
     shells: () => shells.latest,
     current,
     select: (value: string) => {
       if (value === current()) return
-      // TODO: Dax is considering the V2 shell discovery and config update APIs.
-      // void serverSync().updateConfig({ shell: value })
+      void serverSync().updateConfig({ shell: value })
     },
   }
 }
@@ -75,9 +66,7 @@ export function createAppearanceSettingsController() {
   const settings = useSettings()
   const theme = useTheme()
   const themes = createMemo(() => theme.ids().map((id) => ({ id, name: theme.name(id) })))
-
   onMount(() => void theme.loadThemes())
-
   return {
     scheme: {
       current: theme.colorScheme,
@@ -117,7 +106,7 @@ export type SoundSelectOption = (typeof soundOptions)[number]
 
 export function createSoundSettingsController() {
   const settings = useSettings()
-  const preview = createSoundPreviewController(playSoundById)
+  const preview = soundPreview()
   const channel = (
     enabled: Accessor<boolean>,
     current: Accessor<string>,
@@ -143,27 +132,56 @@ export function createSoundSettingsController() {
       preview.play(option.id)
     },
   })
-
   return {
     agent: channel(
       settings.sounds.agentEnabled,
       settings.sounds.agent,
-      (value) => settings.sounds.setAgentEnabled(value),
-      (id) => settings.sounds.setAgent(id),
+      settings.sounds.setAgentEnabled,
+      settings.sounds.setAgent,
     ),
     permissions: channel(
       settings.sounds.permissionsEnabled,
       settings.sounds.permissions,
-      (value) => settings.sounds.setPermissionsEnabled(value),
-      (id) => settings.sounds.setPermissions(id),
+      settings.sounds.setPermissionsEnabled,
+      settings.sounds.setPermissions,
     ),
     errors: channel(
       settings.sounds.errorsEnabled,
       settings.sounds.errors,
-      (value) => settings.sounds.setErrorsEnabled(value),
-      (id) => settings.sounds.setErrors(id),
+      settings.sounds.setErrorsEnabled,
+      settings.sounds.setErrors,
     ),
   }
+}
+
+function soundPreview() {
+  const state = {
+    cleanup: undefined as (() => void) | undefined,
+    timeout: undefined as NodeJS.Timeout | undefined,
+    run: 0,
+  }
+  const stop = () => {
+    state.run += 1
+    state.cleanup?.()
+    clearTimeout(state.timeout)
+    state.cleanup = undefined
+  }
+  const play = (id: string | undefined) => {
+    stop()
+    if (!id) return
+    const run = ++state.run
+    state.timeout = setTimeout(() => {
+      void playSoundById(id).then((cleanup) => {
+        if (state.run !== run) {
+          cleanup?.()
+          return
+        }
+        state.cleanup = cleanup
+      })
+    }, 100)
+  }
+  onCleanup(stop)
+  return { play, stop }
 }
 
 export type PermissionScopeController = ReturnType<typeof createPermissionScopeController>
